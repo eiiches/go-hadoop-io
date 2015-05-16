@@ -3,7 +3,6 @@ package hadoop
 import "io"
 import "fmt"
 import "bytes"
-import "github.com/eiiches/go-bzip2"
 
 var SEQ_MAGIC = []byte("SEQ")
 
@@ -18,16 +17,17 @@ const (
 type sequenceFileBlock struct {
 	numRecords     int
 	numReadRecords int
-	keyReader      *bzip2.Bz2Reader
-	keyLenReader   *bzip2.Bz2Reader
-	valueReader    *bzip2.Bz2Reader
-	valueLenReader *bzip2.Bz2Reader
+	keyReader      io.Reader
+	keyLenReader   io.Reader
+	valueReader    io.Reader
+	valueLenReader io.Reader
 }
 
 type SequenceFileReader struct {
 	sync   []byte
 	reader io.Reader
 	block  *sequenceFileBlock
+	codec  Codec
 }
 
 func NewSequenceFileReader(r io.Reader) (*SequenceFileReader, error) {
@@ -53,8 +53,8 @@ func NewSequenceFileReader(r io.Reader) (*SequenceFileReader, error) {
 		var valueClassName TextWritable
 		keyClassName.Read(r)
 		valueClassName.Read(r)
-		fmt.Println("keyClassName =", string(keyClassName.Buf))
-		fmt.Println("valueClassName =", string(valueClassName.Buf))
+		// fmt.Println("keyClassName =", string(keyClassName.Buf))
+		// fmt.Println("valueClassName =", string(valueClassName.Buf))
 	}
 
 	var compressed = false
@@ -65,7 +65,7 @@ func NewSequenceFileReader(r io.Reader) (*SequenceFileReader, error) {
 			return nil, err
 		}
 	}
-	fmt.Println("compressed =", compressed)
+	// fmt.Println("compressed =", compressed)
 
 	var blockCompressed = false
 	if version[0] >= VERSION_BLOCK_COMPRESS {
@@ -74,14 +74,21 @@ func NewSequenceFileReader(r io.Reader) (*SequenceFileReader, error) {
 		if err != nil {
 			return nil, err
 		}
+		_ = blockCompressed
 	}
-	fmt.Println("blockCompressed =", blockCompressed)
+	// fmt.Println("blockCompressed =", blockCompressed)
 
+	var codec Codec = nil
 	if compressed {
 		if version[0] >= VERSION_CUSTOM_COMPRESS {
 			var codecClassName TextWritable
 			codecClassName.Read(r)
-			fmt.Println("codecClassName =", string(codecClassName.Buf))
+			var ok bool
+			codec, ok = Codecs[string(codecClassName.Buf)]
+			if !ok {
+				return nil, fmt.Errorf("unsupported codec")
+			}
+			// fmt.Println("codecClassName =", string(codecClassName.Buf))
 		} else {
 			return nil, fmt.Errorf("not implemented")
 		}
@@ -108,12 +115,13 @@ func NewSequenceFileReader(r io.Reader) (*SequenceFileReader, error) {
 		if _, err := io.ReadFull(r, sync[:]); err != nil {
 			return nil, err
 		}
-		fmt.Println("sync =", sync[:])
+		// fmt.Println("sync =", sync[:])
 	}
 
 	return &SequenceFileReader{
 		sync:   sync,
 		reader: r,
+		codec:  codec,
 	}, nil
 }
 
@@ -133,20 +141,20 @@ func (self *SequenceFileReader) readBlock() (*sequenceFileBlock, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println("numRecords =", numRecords)
+	// fmt.Println("numRecords =", numRecords)
 
 	keyLenBuffer, err := ReadBuffer(self.reader)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println("len(keyLenBuffer) =", len(keyLenBuffer))
+	// fmt.Println("len(keyLenBuffer) =", len(keyLenBuffer))
 
-	// fw, err := os.Create("keylenbuf.bz2")
+	// fw, err := os.Create("keylenbuf.lz4")
 	// fw.Write(keyLenBuffer)
 	// fw.Close()
 
-	fmt.Println("keylenbuf = [", keyLenBuffer[:18], "...]")
-	keyLenReader, err := bzip2.NewReader(bytes.NewReader(keyLenBuffer))
+	// fmt.Println("keylenbuf = [", keyLenBuffer[:18], "...]")
+	keyLenReader, err := self.codec.Uncompress(nil, keyLenBuffer)
 	if err != nil {
 		return nil, err
 	}
@@ -155,22 +163,22 @@ func (self *SequenceFileReader) readBlock() (*sequenceFileBlock, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println("len(keyBuffer) =", len(keyBuffer))
-	keyReader, err := bzip2.NewReader(bytes.NewReader(keyBuffer))
+	// fmt.Println("len(keyBuffer) =", len(keyBuffer))
+	// f2, _ := os.Create("keybuf.lz4")
+	// f2.Write(keyBuffer)
+	// f2.Close()
+
+	keyReader, err := self.codec.Uncompress(nil, keyBuffer)
 	if err != nil {
 		return nil, err
 	}
-
-	// f2, err := os.Create("keybuf.bz2")
-	// f2.Write(keyBuffer)
-	// f2.Close()
 
 	valueLenBuffer, err := ReadBuffer(self.reader)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println("len(valueLenBuffer) =", len(valueLenBuffer))
-	valueLenReader, err := bzip2.NewReader(bytes.NewReader(valueLenBuffer))
+	// fmt.Println("len(valueLenBuffer) =", len(valueLenBuffer))
+	valueLenReader, err := self.codec.Uncompress(nil, valueLenBuffer)
 	if err != nil {
 		return nil, err
 	}
@@ -179,8 +187,9 @@ func (self *SequenceFileReader) readBlock() (*sequenceFileBlock, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println("len(valueBuffer) =", len(valueBuffer))
-	valueReader, err := bzip2.NewReader(bytes.NewReader(valueBuffer))
+	// fmt.Println("len(valueBuffer) =", len(valueBuffer))
+	valueReader, err := self.codec.Uncompress(nil, valueBuffer)
+	// fmt.Println("valueBuf = [", valueReader[:18], "...]")
 	if err != nil {
 		return nil, err
 	}
@@ -192,19 +201,14 @@ func (self *SequenceFileReader) readBlock() (*sequenceFileBlock, error) {
 
 	return &sequenceFileBlock{
 		numRecords:     int(numRecords),
-		keyReader:      keyReader,
-		keyLenReader:   keyLenReader,
-		valueReader:    valueReader,
-		valueLenReader: valueLenReader,
+		keyReader:      bytes.NewReader(keyReader),
+		keyLenReader:   bytes.NewReader(keyLenReader),
+		valueReader:    bytes.NewReader(valueReader),
+		valueLenReader: bytes.NewReader(valueLenReader),
 	}, nil
 }
 
 func (block *sequenceFileBlock) Close() error {
-	block.keyReader.Close()
-	block.valueReader.Close()
-	block.keyLenReader.Close()
-	block.valueLenReader.Close()
-	// FIXME: handle errors from close()
 	return nil
 }
 
