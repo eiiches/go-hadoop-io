@@ -1,6 +1,5 @@
 package hadoop
 
-import "os"
 import "io"
 import "fmt"
 import "bytes"
@@ -16,9 +15,19 @@ const (
 	VERSION_WITH_METADATA   = 6
 )
 
+type sequenceFileBlock struct {
+	numRecords     int
+	numReadRecords int
+	keyReader      *bzip2.Bz2Reader
+	keyLenReader   *bzip2.Bz2Reader
+	valueReader    *bzip2.Bz2Reader
+	valueLenReader *bzip2.Bz2Reader
+}
+
 type SequenceFileReader struct {
 	sync   []byte
 	reader io.Reader
+	block  *sequenceFileBlock
 }
 
 func NewSequenceFileReader(r io.Reader) (*SequenceFileReader, error) {
@@ -108,84 +117,138 @@ func NewSequenceFileReader(r io.Reader) (*SequenceFileReader, error) {
 	}, nil
 }
 
-func (self *SequenceFileReader) Read(key Writable, value Writable) error {
+func (self *SequenceFileReader) readBlock() (*sequenceFileBlock, error) {
 	if self.sync != nil {
 		ReadInt(self.reader)
 		var sync [SYNC_HASH_SIZE]byte
 		if _, err := io.ReadFull(self.reader, sync[:]); err != nil {
-			return err
+			return nil, err
 		}
 		if bytes.Compare(sync[:], self.sync) != 0 {
-			return fmt.Errorf("sync check failure")
+			return nil, fmt.Errorf("sync check failure")
 		}
 	}
 
 	numRecords, err := ReadVLong(self.reader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	fmt.Println("numRecords =", numRecords)
 
 	keyLenBuffer, err := ReadBuffer(self.reader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	fmt.Println("len(keyLenBuffer) =", len(keyLenBuffer))
 
-	fw, err := os.Create("keylenbuf.bz2")
-	fw.Write(keyLenBuffer)
-	fw.Close()
+	// fw, err := os.Create("keylenbuf.bz2")
+	// fw.Write(keyLenBuffer)
+	// fw.Close()
 
 	fmt.Println("keylenbuf = [", keyLenBuffer[:18], "...]")
 	keyLenReader, err := bzip2.NewReader(bytes.NewReader(keyLenBuffer))
 	if err != nil {
-		return err
-	}
-	for i := 0; i < int(numRecords); i++ {
-		l, err := ReadVLong(keyLenReader)
-		if err != nil {
-			return err
-		}
-		fmt.Println(l)
+		return nil, err
 	}
 
 	keyBuffer, err := ReadBuffer(self.reader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	fmt.Println("len(keyBuffer) =", len(keyBuffer))
 	keyReader, err := bzip2.NewReader(bytes.NewReader(keyBuffer))
 	if err != nil {
-		return err
-	}
-	for i := 0; i < int(numRecords); i++ {
-		var l LongWritable
-		if err := l.Read(keyReader); err != nil {
-			return err
-		}
-		fmt.Println(l)
+		return nil, err
 	}
 
-	f2, err := os.Create("keybuf.bz2")
-	f2.Write(keyBuffer)
-	f2.Close()
+	// f2, err := os.Create("keybuf.bz2")
+	// f2.Write(keyBuffer)
+	// f2.Close()
 
 	valueLenBuffer, err := ReadBuffer(self.reader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	fmt.Println("len(valueLenBuffer) =", len(valueLenBuffer))
+	valueLenReader, err := bzip2.NewReader(bytes.NewReader(valueLenBuffer))
+	if err != nil {
+		return nil, err
+	}
 
 	valueBuffer, err := ReadBuffer(self.reader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	fmt.Println("len(valueBuffer) =", len(valueBuffer))
+	valueReader, err := bzip2.NewReader(bytes.NewReader(valueBuffer))
+	if err != nil {
+		return nil, err
+	}
 
-	fp := self.reader.(*os.File)
+	// fp := self.reader.(*os.File)
 
-	pos, _ := fp.Seek(0, os.SEEK_CUR)
-	fmt.Println(pos)
+	// pos, _ := fp.Seek(0, os.SEEK_CUR)
+	// fmt.Println(pos)
 
-	return io.EOF
+	return &sequenceFileBlock{
+		numRecords:     int(numRecords),
+		keyReader:      keyReader,
+		keyLenReader:   keyLenReader,
+		valueReader:    valueReader,
+		valueLenReader: valueLenReader,
+	}, nil
+}
+
+func (block *sequenceFileBlock) Close() error {
+	block.keyReader.Close()
+	block.valueReader.Close()
+	block.keyLenReader.Close()
+	block.valueLenReader.Close()
+	// FIXME: handle errors from close()
+	return nil
+}
+
+func (self *SequenceFileReader) Close() error {
+	if self.block != nil {
+		err := self.block.Close()
+		self.block = nil
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (self *SequenceFileReader) Read(key Writable, value Writable) error {
+	for self.block == nil || self.block.isEof() {
+		oldBlock := self.block
+		newBlock, err := self.readBlock()
+		if err != nil {
+			return err
+		}
+		self.block = newBlock
+		if oldBlock != nil {
+			oldBlock.Close() // TODO: handle error
+		}
+	}
+
+	err := self.block.read(key, value)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (block *sequenceFileBlock) isEof() bool {
+	return block.numReadRecords >= block.numRecords
+}
+
+func (block *sequenceFileBlock) read(key Writable, value Writable) error {
+	if block.isEof() {
+		return io.EOF
+	}
+	key.Read(block.keyReader)
+	value.Read(block.valueReader)
+	block.numReadRecords++
+	return nil
 }
