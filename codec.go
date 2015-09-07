@@ -7,6 +7,7 @@ import "C"
 
 import (
 	"bytes"
+	"compress/zlib"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -17,14 +18,41 @@ import (
 
 var (
 	Codecs map[string]Codec = map[string]Codec{
-		"org.apache.hadoop.io.compress.Lz4Codec":   &Lz4Codec{},
-		"org.apache.hadoop.io.compress.BZip2Codec": &Bzip2Codec{},
+		"org.apache.hadoop.io.compress.DefaultCodec": &ZlibCodec{},
+		"org.apache.hadoop.io.compress.ZlibCodec":    &ZlibCodec{},
+		"org.apache.hadoop.io.compress.Lz4Codec":     &Lz4Codec{},
+		"org.apache.hadoop.io.compress.BZip2Codec":   &Bzip2Codec{},
 	}
 )
 
 type Codec interface {
 	Uncompress(dst, src []byte) ([]byte, error)
 	Compress(dst, src []byte) ([]byte, error)
+}
+
+type ZlibCodec struct{}
+
+func (c *ZlibCodec) Uncompress(dst, src []byte) ([]byte, error) {
+	reader, err := zlib.NewReader(bytes.NewReader(src))
+	if err != nil {
+		return nil, err
+	}
+	var buf [512]byte
+	for {
+		n, err := reader.Read(buf[:])
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
+		dst = append(dst, buf[:n]...)
+		if err == io.EOF {
+			break
+		}
+	}
+	return dst, nil
+}
+
+func (c *ZlibCodec) Compress(dst, src []byte) ([]byte, error) {
+	panic("")
 }
 
 type Bzip2Codec struct {
