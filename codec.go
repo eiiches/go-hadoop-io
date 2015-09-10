@@ -19,7 +19,6 @@ import (
 var (
 	Codecs map[string]Codec = map[string]Codec{
 		"org.apache.hadoop.io.compress.DefaultCodec": &ZlibCodec{},
-		"org.apache.hadoop.io.compress.ZlibCodec":    &ZlibCodec{},
 		"org.apache.hadoop.io.compress.Lz4Codec":     &Lz4Codec{},
 		"org.apache.hadoop.io.compress.BZip2Codec":   &Bzip2Codec{},
 	}
